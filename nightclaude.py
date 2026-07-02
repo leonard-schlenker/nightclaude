@@ -28,7 +28,11 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # tomllib is 3.11+; macOS often ships older
+    sys.exit("error: nightclaude needs Python 3.11 or newer "
+             f"(this is {sys.version.split()[0]})")
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("NIGHTCLAUDE_DATA", Path.home() / ".local/share/nightclaude"))
@@ -468,6 +472,14 @@ def cmd_run(args, cfg):
 
 def _run_queue(args, cfg, log):
     cut = cutoff_time(cfg)
+    # A scheduler may fire a missed night run during the day (launchd runs
+    # jobs skipped while the Mac slept as soon as it wakes). A genuine night
+    # start is always close to the cutoff; a daytime start is not.
+    if not args.force and cut - dt.datetime.now() > dt.timedelta(hours=10):
+        log(f"cutoff {cut:%H:%M} is more than 10h away - this is a daytime "
+            "start (wake-from-sleep catch-up?), not a night run; stopping. "
+            "use --force to run anyway")
+        return
     log(f"nightclaude run starting (cutoff {cut:%Y-%m-%d %H:%M}, force={args.force})")
 
     # Give failed tasks from previous nights another chance, within the limit.

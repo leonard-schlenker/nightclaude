@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS equivalent of nightclaude.timer/.service. __HOME__ is filled
+         in by install.sh (launchd does not expand ~ or $HOME). -->
+    <key>Label</key>
+    <string>com.nightclaude.run</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/nightclaude</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>1</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <!-- If the Mac was asleep at 01:30, launchd fires the job on wake;
+         the runner itself detects a daytime start and exits. -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.local/share/nightclaude/logs/launchd-run.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.local/share/nightclaude/logs/launchd-run.log</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

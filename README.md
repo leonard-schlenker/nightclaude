@@ -30,12 +30,16 @@ Note: night runs avoid the 5-hour session window but still count toward the
 ```
 
 This symlinks the CLI to `~/.local/bin/nightclaude`, copies the example config
-to `~/.config/nightclaude/config.toml` (if none exists), and enables the
-systemd user timer.
+to `~/.config/nightclaude/config.toml` (if none exists), and schedules the
+nightly run — as a systemd user timer on Linux, or a launchd agent on macOS.
+Needs Python 3.11+.
 
 In standalone (worker) mode the machine must be on at night. If it suspends,
-either disable suspend at night or schedule a wake, e.g. with a cron entry
-running `rtcwake -m no -t $(date -d 'tomorrow 01:25' +%s)`.
+either disable suspend at night or schedule a wake — on Linux e.g. with a
+cron entry running `rtcwake -m no -t $(date -d 'tomorrow 01:25' +%s)`, on
+macOS with `sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00`. (If a Mac
+sleeps through 01:30 anyway, launchd fires the missed job on wake, but the
+runner notices the daytime start and exits without touching your quota.)
 
 ## Remote worker
 
@@ -49,7 +53,8 @@ runs tasks itself:
   shutting down).
 - The worker's own timer runs the queue at night, exactly like standalone
   mode (rate-limit waiting, cutoff, retries).
-- On PC boot/login, `nightclaude-pull.service` runs `nightclaude pull`:
+- On PC login, a pull job (`nightclaude-pull.service` on Linux,
+  `com.nightclaude.pull` on macOS) runs `nightclaude pull`:
   statuses and logs come back, and finished tasks' mirrors are rsynced onto
   the original workdirs. Pull uses `rsync -u`, so files you edited on the PC
   in the meantime are never overwritten. If the worker is off, pull is a
@@ -63,7 +68,9 @@ runs tasks itself:
 1. Any Linux machine that can stay on at night, reachable via ssh with key
    auth: `ssh-copy-id user@worker.local`. The worker needs very little
    compute — the heavy lifting happens on Anthropic's side — so even a
-   Raspberry Pi 3/4/5 (64-bit OS, idles at ~2-4 W) works fine.
+   Raspberry Pi 3/4/5 (64-bit OS, idles at ~2-4 W) works fine. (To use a Mac
+   as the worker, clone this repo there and run `./install.sh` on it instead
+   of using the deploy script, which assumes systemd.)
 2. Set the real host in `~/.config/nightclaude/config.toml` under `[remote]`,
    then deploy: `./deploy-worker.sh user@worker.local`
 3. Install Claude Code on the worker and log in with your subscription:
@@ -121,6 +128,12 @@ The task runs unattended, so the prompt must be self-contained:
 
 ```bash
 nightclaude status
+
+# Linux
 systemctl --user list-timers nightclaude.timer
 journalctl --user -u nightclaude.service --since today
+
+# macOS
+launchctl print "gui/$(id -u)/com.nightclaude.run"   # loaded? next run?
+cat ~/.local/share/nightclaude/logs/launchd-run.log
 ```
