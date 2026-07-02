@@ -11,10 +11,18 @@ if [ ! -f ~/.config/nightclaude/config.toml ]; then
     echo "created ~/.config/nightclaude/config.toml"
 fi
 
-cp systemd/nightclaude.service systemd/nightclaude.timer ~/.config/systemd/user/
+cp systemd/nightclaude.service systemd/nightclaude.timer \
+   systemd/nightclaude-pull.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now nightclaude.timer
 
-echo
-echo "installed. next run:"
-systemctl --user list-timers nightclaude.timer --no-pager
+if grep -Eq '^\s*role\s*=\s*"controller"' ~/.config/nightclaude/config.toml; then
+    echo "controller mode: enabling pull-on-boot, disabling the local night timer"
+    systemctl --user disable --now nightclaude.timer 2>/dev/null || true
+    systemctl --user enable nightclaude-pull.service
+    echo "installed. deploy the worker with: ./deploy-pi.sh user@host"
+else
+    systemctl --user enable --now nightclaude.timer
+    echo
+    echo "installed. next run:"
+    systemctl --user list-timers nightclaude.timer --no-pager
+fi

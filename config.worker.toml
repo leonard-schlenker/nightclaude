@@ -1,0 +1,11 @@
+# nightclaude worker config (Raspberry Pi). Installed by deploy-pi.sh.
+role = "worker"
+
+cutoff = "07:00"
+task_timeout_minutes = 90
+retry_wait_minutes = 30
+max_tasks_per_night = 4
+max_attempts = 2
+default_model = "sonnet"
+default_permission_mode = "acceptEdits"
+claude_bin = "claude"

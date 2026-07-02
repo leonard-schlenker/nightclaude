@@ -51,6 +51,19 @@ DEFAULT_CONFIG = {
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
     "claude_bin": "claude",
+    # "worker": this machine runs the queue at night (default, also the Pi).
+    # "controller": this machine only queues tasks and syncs them to the
+    # remote worker configured in the [remote] table.
+    "role": "worker",
+}
+
+DEFAULT_REMOTE = {
+    # ssh destination of the worker, e.g. "pi@raspberrypi.local"
+    "host": "",
+    # where workdirs are mirrored on the worker (relative to its home)
+    "work_root": "nightclaude-work",
+    # the worker's nightclaude data dir (relative to its home)
+    "data_dir": ".local/share/nightclaude",
 }
 
 STATUSES = ("pending", "running", "done", "failed")
@@ -62,6 +75,9 @@ def load_config():
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
         cfg.update(tomllib.loads(CONFIG_FILE.read_text()))
+    remote = dict(DEFAULT_REMOTE)
+    remote.update(cfg.get("remote") or {})
+    cfg["remote"] = remote
     return cfg
 
 
@@ -84,7 +100,7 @@ def parse_task(path: Path):
 
 
 def write_task(meta: dict, prompt: str, path: Path):
-    keys = ["id", "title", "status", "depends_on", "workdir", "model",
+    keys = ["id", "title", "status", "depends_on", "workdir", "origin_workdir", "model",
             "permission_mode", "priority", "timeout_minutes", "attempts",
             "created", "started", "finished", "cost_usd", "error"]
     lines = ["---"]
@@ -128,6 +144,106 @@ def slugify(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40] or "task"
 
 
+# ---------------------------------------------------------------- remote sync
+
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+
+
+def remote_or_exit(cfg):
+    r = cfg["remote"]
+    if not r["host"]:
+        sys.exit(f"error: no [remote] host configured in {CONFIG_FILE}")
+    return r
+
+
+def remote_reachable(r):
+    return subprocess.run(["ssh", *SSH_OPTS, r["host"], "true"],
+                          capture_output=True).returncode == 0
+
+
+def remote_workdir(r, local_workdir):
+    """Map a controller-side workdir to its mirror on the worker."""
+    return r["work_root"].rstrip("/") + "/" + local_workdir.lstrip("/")
+
+
+def _sync(cmds, dry):
+    for cmd in cmds:
+        if dry:
+            print("would run:", " ".join(cmd))
+            continue
+        res = subprocess.run(cmd)
+        if res.returncode != 0:
+            sys.exit(f"error: command failed (exit {res.returncode}): {' '.join(cmd)}")
+
+
+def do_push(cfg, dry=False):
+    r = remote_or_exit(cfg)
+    if not dry:
+        if not remote_reachable(r):
+            sys.exit(f"error: {r['host']} unreachable (worker off? ssh key missing?)")
+        # Take over the worker's results first so a completed task is never
+        # reset to pending by pushing a stale local status over it.
+        do_pull(cfg)
+    tasks = load_tasks()
+    dirs = set()
+    for t in tasks.values():
+        if t["status"] != "pending":
+            continue
+        if not t.get("origin_workdir"):
+            origin, mirror = t["workdir"], remote_workdir(r, t["workdir"])
+            if not dry:
+                t["origin_workdir"], t["workdir"] = origin, mirror
+                save_task(t)
+        else:
+            origin, mirror = t["origin_workdir"], t["workdir"]
+        dirs.add((origin, mirror))
+    cmds = []
+    for origin, mirror in sorted(dirs):
+        cmds.append(["ssh", *SSH_OPTS, r["host"], f"mkdir -p '{mirror}'"])
+        cmds.append(["rsync", "-a", origin.rstrip("/") + "/", f"{r['host']}:{mirror}/"])
+    cmds.append(["ssh", *SSH_OPTS, r["host"],
+                 f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"])
+    cmds.append(["rsync", "-a", str(TASKS_DIR) + "/", f"{r['host']}:{r['data_dir']}/tasks/"])
+    _sync(cmds, dry)
+    if not dry:
+        n = len(dirs)
+        print(f"pushed queue to {r['host']} ({n} pending task{'s' if n != 1 else ''})")
+
+
+def do_pull(cfg, dry=False):
+    r = remote_or_exit(cfg)
+    cmds = [
+        ["ssh", *SSH_OPTS, r["host"],
+         f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"],
+        ["rsync", "-a", f"{r['host']}:{r['data_dir']}/tasks/", str(TASKS_DIR) + "/"],
+        ["rsync", "-a", f"{r['host']}:{r['data_dir']}/logs/", str(LOGS_DIR) + "/"],
+    ]
+    _sync(cmds, dry)
+    # Bring results home: sync finished tasks' mirrors back to the original
+    # workdirs. -u never overwrites files that are newer on this machine.
+    pulled = []
+    for t in load_tasks().values():
+        if t.get("origin_workdir") and t["status"] in ("done", "failed"):
+            _sync([["rsync", "-au", f"{r['host']}:{t['workdir'].rstrip('/')}/",
+                    t["origin_workdir"].rstrip("/") + "/"]], dry)
+            pulled.append(f"{t['id']} [{t['status']}]")
+    if not dry:
+        print(f"pulled from {r['host']}: "
+              + ("; ".join(pulled) if pulled else "no finished tasks"))
+
+
+def cmd_push(args, cfg):
+    do_push(cfg, dry=args.dry_run)
+
+
+def cmd_pull(args, cfg):
+    r = remote_or_exit(cfg)
+    if not args.dry_run and not remote_reachable(r):
+        print(f"{r['host']} unreachable, nothing pulled")
+        return  # exit 0 so the on-boot service doesn't flag an error
+    do_pull(cfg, dry=args.dry_run)
+
+
 # ---------------------------------------------------------------- commands
 
 def cmd_add(args, cfg):
@@ -166,6 +282,13 @@ def cmd_add(args, cfg):
     path = TASKS_DIR / f"{tid}.md"
     write_task(meta, prompt, path)
     print(f"queued: {tid}\n  file: {path}")
+
+    if cfg["role"] == "controller" and cfg["remote"]["host"] and not args.no_push:
+        if remote_reachable(cfg["remote"]):
+            do_push(cfg)
+        else:
+            print(f"note: {cfg['remote']['host']} unreachable - "
+                  "run `nightclaude push` before shutting down")
 
 
 def cmd_list(args, cfg):
@@ -214,6 +337,13 @@ def cmd_remove(args, cfg):
     t = find_task(load_tasks(), args.id)
     t["_path"].unlink()
     print(f"removed: {t['id']}")
+    r = cfg["remote"]
+    if cfg["role"] == "controller" and r["host"]:
+        gone = subprocess.run(
+            ["ssh", *SSH_OPTS, r["host"], f"rm -f '{r['data_dir']}/tasks/{t['id']}.md'"],
+            capture_output=True).returncode == 0
+        print(f"  also removed on {r['host']}" if gone
+              else f"  warning: could not remove on {r['host']} - it may still run there")
 
 
 def cmd_status(args, cfg):
@@ -222,6 +352,10 @@ def cmd_status(args, cfg):
     for t in tasks.values():
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     print("queue:", ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "empty")
+    if cfg["role"] == "controller" and cfg["remote"]["host"]:
+        r = cfg["remote"]
+        up = remote_reachable(r)
+        print(f"worker: {r['host']} ({'reachable' if up else 'unreachable'})")
     runner_logs = sorted(LOGS_DIR.glob("runner-*.log"))
     if runner_logs:
         last = runner_logs[-1]
@@ -263,7 +397,16 @@ def run_one(t, cfg, log):
         "--model", t.get("model") or cfg["default_model"],
         "--permission-mode", t.get("permission_mode") or cfg["default_permission_mode"],
     ]
+    # On a controller running --local, pushed tasks point at the worker's
+    # mirror path; use the original local workdir instead.
     workdir = t.get("workdir") or str(Path.home())
+    if t.get("_use_origin") and t.get("origin_workdir"):
+        workdir = t["origin_workdir"]
+    # Pushed tasks carry worker-relative mirror paths; anchor them at home.
+    workdir = Path(workdir).expanduser()
+    if not workdir.is_absolute():
+        workdir = Path.home() / workdir
+    workdir = str(workdir)
     timeout = int(t.get("timeout_minutes") or cfg["task_timeout_minutes"]) * 60
     task_log = LOGS_DIR / f"{t['id']}.log"
     log(f"  cmd: {' '.join(cmd)} (cwd={workdir}, timeout={timeout//60}m)")
@@ -302,6 +445,9 @@ def run_one(t, cfg, log):
 
 
 def cmd_run(args, cfg):
+    if cfg["role"] == "controller" and not args.local:
+        sys.exit("this machine is a controller; the remote worker runs the queue.\n"
+                 "use `nightclaude run --local` to run it here anyway.")
     lock = DATA_DIR / "runner.lock"
     if lock.exists() and time.time() - lock.stat().st_mtime < 12 * 3600:
         sys.exit("another runner appears to be active (runner.lock); remove it if stale")
@@ -357,6 +503,8 @@ def _run_queue(args, cfg, log):
         ready.sort(key=lambda t: (t["priority"], t.get("created", "")))
         t = ready[0]
 
+        if getattr(args, "local", False):
+            t["_use_origin"] = True
         log(f"running {t['id']} ({t.get('title', '')})")
         t["status"] = "running"
         t["started"] = dt.datetime.now().isoformat(timespec="seconds")
@@ -418,6 +566,8 @@ def main():
     a.add_argument("--priority", type=int, default=5, help="1=first .. 9=last (default 5)")
     a.add_argument("--permission-mode", help=f"default: {cfg['default_permission_mode']}")
     a.add_argument("--timeout", type=int, help="minutes before the task is killed")
+    a.add_argument("--no-push", action="store_true",
+                   help="don't sync to the remote worker right away")
     a.set_defaults(func=cmd_add)
 
     l = sub.add_parser("list", help="list open tasks")
@@ -435,7 +585,15 @@ def main():
 
     r = sub.add_parser("run", help="run the queue now (used by the systemd timer)")
     r.add_argument("--force", action="store_true", help="ignore the morning cutoff")
+    r.add_argument("--local", action="store_true",
+                   help="on a controller: run the queue on this machine")
     r.set_defaults(func=cmd_run)
+
+    for name, fn, hlp in [("push", cmd_push, "sync queue + workdirs to the remote worker"),
+                          ("pull", cmd_pull, "fetch results + statuses from the remote worker")]:
+        s = sub.add_parser(name, help=hlp)
+        s.add_argument("--dry-run", action="store_true", help="print sync commands only")
+        s.set_defaults(func=fn)
 
     sub.add_parser("status", help="queue summary + last run log").set_defaults(func=cmd_status)
 

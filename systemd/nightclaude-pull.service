@@ -1,0 +1,14 @@
+[Unit]
+Description=nightclaude - fetch overnight results from the worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nightclaude pull
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Give the network / the Pi's mDNS a moment right after boot.
+ExecStartPre=/bin/sleep 15
+
+[Install]
+WantedBy=default.target
