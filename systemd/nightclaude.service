@@ -1,0 +1,10 @@
+[Unit]
+Description=nightclaude - run queued Claude Code tasks
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nightclaude run
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A whole night may pass while waiting out a rate limit.
+TimeoutStartSec=8h
+Nice=10

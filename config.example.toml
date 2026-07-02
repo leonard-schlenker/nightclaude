@@ -1,0 +1,28 @@
+# Copy to ~/.config/nightclaude/config.toml and adjust.
+
+# Runner refuses to start new tasks after this local time.
+cutoff = "07:00"
+
+# Kill a single task after this many minutes (overridable per task).
+task_timeout_minutes = 90
+
+# Wait time after a rate limit when no reset timestamp could be parsed.
+retry_wait_minutes = 30
+
+# Cap completed tasks per night to protect the weekly quota. 0 = unlimited.
+max_tasks_per_night = 4
+
+# Nights a failing task is retried before it stays failed.
+max_attempts = 2
+
+# Sonnet is a good default for bulk conversion work and cheaper on quota
+# than Opus. Override per task with --model.
+default_model = "sonnet"
+
+# acceptEdits lets Claude create/edit files in the task's workdir without
+# prompting, but still blocks arbitrary shell commands. For tasks that need
+# to run commands, set --permission-mode bypassPermissions on that task
+# (only for prompts you trust, e.g. your own conversion jobs).
+default_permission_mode = "acceptEdits"
+
+claude_bin = "claude"

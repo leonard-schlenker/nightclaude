@@ -1,0 +1,11 @@
+[Unit]
+Description=Run nightclaude queue at night
+
+[Timer]
+OnCalendar=*-*-* 01:30:00
+# Do NOT catch up missed runs during the day - nights only.
+Persistent=false
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
