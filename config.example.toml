@@ -26,3 +26,16 @@ default_model = "sonnet"
 default_permission_mode = "acceptEdits"
 
 claude_bin = "claude"
+
+# "worker" (default): this machine runs the queue at night. "controller":
+# this machine only queues tasks and syncs them to the remote worker below
+# (see "Remote worker" in the README).
+#role = "controller"
+
+#[remote]
+# ssh destination of the worker (key auth required, see deploy-pi.sh).
+#host = "pi@raspberrypi.local"
+# Where workdirs are mirrored on the worker, relative to its home.
+#work_root = "nightclaude-work"
+# The worker's nightclaude data dir, relative to its home.
+#data_dir = ".local/share/nightclaude"
