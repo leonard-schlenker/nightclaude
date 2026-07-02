@@ -12,7 +12,8 @@ that runs Claude Code — a Raspberry Pi, a home server, a spare laptop.
 
 - `nightclaude add` writes a task file (Markdown with frontmatter metadata,
   prompt as body) to `~/.local/share/nightclaude/tasks/`.
-- A systemd **user timer** fires at 01:30 and runs `nightclaude run`.
+- A scheduled job (systemd user timer on Linux, launchd agent on macOS) fires
+  at 01:30 and runs `nightclaude run`.
 - The runner executes pending tasks in priority + dependency order via
   `claude -p` (headless Claude Code, same Pro login as your terminal).
 - If a task hits the rate limit, the runner sleeps until the limit resets and
@@ -23,28 +24,102 @@ that runs Claude Code — a Raspberry Pi, a home server, a spare laptop.
 Note: night runs avoid the 5-hour session window but still count toward the
 **weekly** Pro cap. Use `max_tasks_per_night` in the config to pace yourself.
 
-## Install
+## Setup
 
-```bash
-./install.sh
-```
+Requirements, on every machine that will *run* tasks:
 
-This symlinks the CLI to `~/.local/bin/nightclaude`, copies the example config
-to `~/.config/nightclaude/config.toml` (if none exists), and schedules the
-nightly run — as a systemd user timer on Linux, or a launchd agent on macOS.
-Needs Python 3.11+.
+- Linux (with systemd) or macOS
+- Python 3.11+
+- Claude Code installed and logged in with your subscription
 
-In standalone (worker) mode the machine must be on at night. If it suspends,
-either disable suspend at night or schedule a wake — on Linux e.g. with a
-cron entry running `rtcwake -m no -t $(date -d 'tomorrow 01:25' +%s)`, on
-macOS with `sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00`. (If a Mac
-sleeps through 01:30 anyway, launchd fires the missed job on wake, but the
-runner notices the daytime start and exits without touching your quota.)
+Then pick a mode: **A** — everything on one machine, or **B** — queue on
+the PC, run on a separate worker.
 
-## Remote worker
+### A. Single machine
 
-With `role = "controller"` and a `[remote]` host in the config, the PC never
-runs tasks itself:
+1. Clone and install:
+
+   ```bash
+   git clone https://github.com/leonard-schlenker/nightclaude.git
+   cd nightclaude
+   ./install.sh
+   ```
+
+   This symlinks the CLI to `~/.local/bin/nightclaude`, creates
+   `~/.config/nightclaude/config.toml` from the example, and schedules the
+   nightly run at 01:30.
+
+2. *(Optional)* Adjust `~/.config/nightclaude/config.toml` — cutoff time,
+   tasks per night, default model; every key is explained there.
+
+3. Make sure the machine is awake at 01:30. If it normally suspends,
+   schedule a wake-up:
+   - Linux: a cron entry running
+     `rtcwake -m no -t $(date -d 'tomorrow 01:25' +%s)`
+   - macOS: `sudo pmset repeat wakeorpoweron MTWRFSU 01:25:00`
+
+   (If a Mac sleeps through 01:30 anyway, launchd fires the missed job on
+   wake, but the runner notices the daytime start and exits without touching
+   your quota.)
+
+Done — queue your first task (see [Usage](#usage)).
+
+### B. Controller (PC) + worker
+
+The worker is any Linux machine that can stay on at night. It needs very
+little compute — the heavy lifting happens on Anthropic's side — so even a
+Raspberry Pi 3/4/5 (64-bit OS, idles at ~2-4 W) works fine. To use a Mac as
+the worker instead, follow **A** on it directly (the deploy script in step 4
+assumes systemd) and only do steps 1-3 here.
+
+On the **PC**:
+
+1. Clone the repo and create the config:
+
+   ```bash
+   git clone https://github.com/leonard-schlenker/nightclaude.git
+   cd nightclaude
+   mkdir -p ~/.config/nightclaude
+   cp config.example.toml ~/.config/nightclaude/config.toml
+   ```
+
+2. In `~/.config/nightclaude/config.toml`, uncomment `role = "controller"`
+   and the `[remote]` section, and set `host` to the worker's ssh
+   destination (e.g. `pi@raspberrypi.local`).
+
+3. Install:
+
+   ```bash
+   ./install.sh
+   ```
+
+   In controller mode this enables pull-on-login and no local night run.
+
+4. Give the PC passwordless ssh access to the worker, then deploy:
+
+   ```bash
+   ssh-copy-id user@worker.local
+   ./deploy-worker.sh user@worker.local
+   ```
+
+   This copies nightclaude to the worker, enables its night timer, and turns
+   on systemd lingering so the timer fires with nobody logged in (asks for
+   the worker's sudo password once).
+
+On the **worker**:
+
+5. Install Claude Code and log in with your subscription — the URL +
+   paste-code `/login` flow works over ssh:
+
+   ```bash
+   curl -fsSL https://claude.ai/install.sh | bash
+   claude        # then type /login
+   ```
+
+Check the result from the PC: `nightclaude status` should report
+`worker: user@worker.local (reachable)`.
+
+## How controller and worker cooperate
 
 - `nightclaude add` writes the task and immediately **pushes** it: the task
   files and the task's whole workdir are rsynced to the worker (workdir
@@ -62,28 +137,8 @@ runs tasks itself:
 - `push` always pulls first, so a task the worker already finished is never
   reset to pending by a stale local copy. `remove` also deletes the task on
   the worker.
-
-### Worker setup (once)
-
-1. Any Linux machine that can stay on at night, reachable via ssh with key
-   auth: `ssh-copy-id user@worker.local`. The worker needs very little
-   compute — the heavy lifting happens on Anthropic's side — so even a
-   Raspberry Pi 3/4/5 (64-bit OS, idles at ~2-4 W) works fine. (To use a Mac
-   as the worker, clone this repo there and run `./install.sh` on it instead
-   of using the deploy script, which assumes systemd.)
-2. Set the real host in `~/.config/nightclaude/config.toml` under `[remote]`,
-   then deploy: `./deploy-worker.sh user@worker.local`
-3. Install Claude Code on the worker and log in with your subscription:
-   `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` and
-   use `/login` (URL + paste-code flow works over ssh).
-4. Re-run `./install.sh` on the PC (enables pull-on-boot, disables the local
-   night timer).
-
-The deploy script also enables systemd *lingering* on the worker so the
-timer fires without anyone logged in.
-
-`nightclaude run --local` still runs the queue on the PC if the worker is
-ever unavailable (uses the original workdirs).
+- `nightclaude run --local` still runs the queue on the PC if the worker is
+  ever unavailable (uses the original workdirs).
 
 ## Usage
 
