@@ -33,8 +33,8 @@ claude_bin = "claude"
 #role = "controller"
 
 #[remote]
-# ssh destination of the worker (key auth required, see deploy-pi.sh).
-#host = "pi@raspberrypi.local"
+# ssh destination of the worker (key auth required, see deploy-worker.sh).
+#host = "user@worker.local"
 # Where workdirs are mirrored on the worker, relative to its home.
 #work_root = "nightclaude-work"
 # The worker's nightclaude data dir, relative to its home.

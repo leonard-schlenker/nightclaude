@@ -7,7 +7,7 @@ After=network-online.target
 Type=oneshot
 ExecStart=%h/.local/bin/nightclaude pull
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Give the network / the Pi's mDNS a moment right after boot.
+# Give the network / the worker's mDNS a moment right after boot.
 ExecStartPre=/bin/sleep 15
 
 [Install]

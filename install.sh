@@ -19,7 +19,7 @@ if grep -Eq '^\s*role\s*=\s*"controller"' ~/.config/nightclaude/config.toml; the
     echo "controller mode: enabling pull-on-boot, disabling the local night timer"
     systemctl --user disable --now nightclaude.timer 2>/dev/null || true
     systemctl --user enable nightclaude-pull.service
-    echo "installed. deploy the worker with: ./deploy-pi.sh user@host"
+    echo "installed. deploy the worker with: ./deploy-worker.sh user@host"
 else
     systemctl --user enable --now nightclaude.timer
     echo

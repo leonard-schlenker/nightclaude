@@ -51,14 +51,14 @@ DEFAULT_CONFIG = {
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
     "claude_bin": "claude",
-    # "worker": this machine runs the queue at night (default, also the Pi).
+    # "worker": this machine runs the queue at night (the default).
     # "controller": this machine only queues tasks and syncs them to the
     # remote worker configured in the [remote] table.
     "role": "worker",
 }
 
 DEFAULT_REMOTE = {
-    # ssh destination of the worker, e.g. "pi@raspberrypi.local"
+    # ssh destination of the worker, e.g. "user@worker.local"
     "host": "",
     # where workdirs are mirrored on the worker (relative to its home)
     "work_root": "nightclaude-work",

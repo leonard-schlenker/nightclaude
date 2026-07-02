@@ -1,4 +1,4 @@
-# nightclaude worker config (Raspberry Pi). Installed by deploy-pi.sh.
+# nightclaude worker config. Installed by deploy-worker.sh.
 role = "worker"
 
 cutoff = "07:00"
