@@ -9,3 +9,10 @@ max_attempts = 2
 default_model = "sonnet"
 default_permission_mode = "acceptEdits"
 claude_bin = "claude"
+
+# Every run gets a built-in system prompt telling the model it is running
+# unattended and must finish without asking questions (see NIGHT_SYSTEM_PROMPT
+# in nightclaude.py). Override it here, or set it to "" to disable:
+#system_prompt = """
+#...
+#"""

@@ -27,6 +27,16 @@ default_permission_mode = "acceptEdits"
 
 claude_bin = "claude"
 
+# Every run gets a built-in system prompt (appended to Claude Code's own via
+# --append-system-prompt) telling the model it is running unattended and must
+# finish without asking questions. See NIGHT_SYSTEM_PROMPT in nightclaude.py
+# for the default; {workdir}, {title} and {timeout_minutes} are filled in per
+# task. Override it here on the machine that runs the queue, or set it to ""
+# to disable:
+#system_prompt = """
+#...
+#"""
+
 # "worker" (default): this machine runs the queue at night. "controller":
 # this machine only queues tasks and syncs them to the remote worker below
 # (see "Remote worker" in the README).

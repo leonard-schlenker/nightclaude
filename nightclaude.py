@@ -40,6 +40,26 @@ TASKS_DIR = DATA_DIR / "tasks"
 LOGS_DIR = DATA_DIR / "logs"
 CONFIG_FILE = Path(os.environ.get("NIGHTCLAUDE_CONFIG", Path.home() / ".config/nightclaude/config.toml"))
 
+# Appended to Claude Code's system prompt for every night run (the model
+# sees it as system-level instructions, not as part of the user prompt).
+# {workdir}, {title} and {timeout_minutes} are filled in per task.
+# Override it with `system_prompt = """..."""` in config.toml on the machine
+# that runs the queue; set it to "" there to disable the injection.
+NIGHT_SYSTEM_PROMPT = """\
+You are running unattended overnight on a headless worker machine, executing
+the queued task "{title}". There is no human present and this is a one-shot,
+non-interactive run: nothing you ask will ever be answered. Never ask
+questions, never wait for confirmation, never stop early to present options -
+pick the most sensible interpretation and carry the task through to
+completion in this single run. You have at most {timeout_minutes} minutes.
+
+Work strictly inside the working directory ({workdir}); the rest of the
+filesystem is read-only for you. Your results are synced back to the user's
+machine in the morning, so leave the working directory in a finished,
+self-explanatory state. If the task turns out to be impossible, write what
+you tried and why it failed to NIGHTCLAUDE-FAILED.md in the working
+directory."""
+
 DEFAULT_CONFIG = {
     # Runner refuses to start new tasks after this time (24h clock, local time).
     "cutoff": "07:00",
@@ -55,6 +75,7 @@ DEFAULT_CONFIG = {
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
     "claude_bin": "claude",
+    "system_prompt": NIGHT_SYSTEM_PROMPT,
     # "worker": this machine runs the queue at night (the default).
     # "controller": this machine only queues tasks and syncs them to the
     # remote worker configured in the [remote] table.
@@ -445,6 +466,14 @@ def run_one(t, cfg, log):
     timeout = int(t.get("timeout_minutes") or cfg["task_timeout_minutes"]) * 60
     task_log = LOGS_DIR / f"{t['id']}.log"
     log(f"  cmd: {' '.join(cmd)} (cwd={workdir}, timeout={timeout//60}m)")
+    sysprompt = str(cfg.get("system_prompt") or "")
+    if sysprompt.strip():
+        for token, value in (("{workdir}", workdir),
+                             ("{title}", t.get("title", "")),
+                             ("{timeout_minutes}", str(timeout // 60))):
+            sysprompt = sysprompt.replace(token, value)
+        cmd += ["--append-system-prompt", sysprompt]
+        log(f"  + system prompt ({len(sysprompt)} chars)")
     try:
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                               cwd=workdir, timeout=timeout)

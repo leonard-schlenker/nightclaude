@@ -205,6 +205,16 @@ The task runs unattended, so the prompt must be self-contained:
   blocked). Add `--permission-mode bypassPermissions` per task if it needs to
   run commands — only for prompts you wrote yourself.
 
+You don't have to explain the night setup itself: every run gets a built-in
+system prompt (via `--append-system-prompt`) telling the model it is running
+unattended on a headless worker, must finish in one shot without asking
+questions, works only inside its workdir, and should leave a
+`NIGHTCLAUDE-FAILED.md` behind if the task proves impossible. The default
+lives in `NIGHT_SYSTEM_PROMPT` at the top of `nightclaude.py`; override it
+per machine with `system_prompt = """..."""` in the config of whichever
+machine runs the queue (the worker, for remote setups), or set it to `""`
+to disable.
+
 ## Monitoring
 
 ```bash
