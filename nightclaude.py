@@ -72,6 +72,13 @@ DEFAULT_REMOTE = {
 
 STATUSES = ("pending", "running", "done", "failed")
 
+# Aliases the claude CLI accepts for --model; anything else must be a full
+# model id like claude-sonnet-5.
+MODEL_ALIASES = ("default", "haiku", "sonnet", "sonnet[1m]", "opus", "opusplan", "fable")
+MODEL_ID_RE = re.compile(r"claude-[a-z0-9.-]+(\[1m\])?")
+
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
+
 
 # ---------------------------------------------------------------- storage
 
@@ -201,14 +208,16 @@ def do_push(cfg, dry=False):
         else:
             origin, mirror = t["origin_workdir"], t["workdir"]
         dirs.add((origin, mirror))
-    cmds = []
     for origin, mirror in sorted(dirs):
-        cmds.append(["ssh", *SSH_OPTS, r["host"], f"mkdir -p '{mirror}'"])
-        cmds.append(["rsync", "-a", origin.rstrip("/") + "/", f"{r['host']}:{mirror}/"])
-    cmds.append(["ssh", *SSH_OPTS, r["host"],
-                 f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"])
-    cmds.append(["rsync", "-a", str(TASKS_DIR) + "/", f"{r['host']}:{r['data_dir']}/tasks/"])
-    _sync(cmds, dry)
+        if not dry:
+            du = subprocess.run(["du", "-sh", origin], capture_output=True, text=True)
+            size = du.stdout.split()[0] if du.returncode == 0 and du.stdout else "?"
+            print(f"syncing workdir {origin} ({size}) -> {r['host']}:{mirror} ...", flush=True)
+        _sync([["ssh", *SSH_OPTS, r["host"], f"mkdir -p '{mirror}'"],
+               ["rsync", "-a", origin.rstrip("/") + "/", f"{r['host']}:{mirror}/"]], dry)
+    _sync([["ssh", *SSH_OPTS, r["host"],
+            f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"],
+           ["rsync", "-a", str(TASKS_DIR) + "/", f"{r['host']}:{r['data_dir']}/tasks/"]], dry)
     if not dry:
         n = len(dirs)
         print(f"pushed queue to {r['host']} ({n} pending task{'s' if n != 1 else ''})")
@@ -250,7 +259,29 @@ def cmd_pull(args, cfg):
 
 # ---------------------------------------------------------------- commands
 
+def validate_add_options(args, cfg):
+    """Reject bad options up front, before the task reaches the queue."""
+    model = args.model or cfg["default_model"]
+    if model not in MODEL_ALIASES and not MODEL_ID_RE.fullmatch(model):
+        sys.exit(f"error: unknown model '{model}' "
+                 f"(aliases: {', '.join(MODEL_ALIASES)}; "
+                 "or a full model id like claude-sonnet-5)")
+    mode = args.permission_mode or cfg["default_permission_mode"]
+    if mode not in PERMISSION_MODES:
+        sys.exit(f"error: invalid permission mode '{mode}' "
+                 f"(one of: {', '.join(PERMISSION_MODES)})")
+    if not 1 <= args.priority <= 9:
+        sys.exit(f"error: priority must be between 1 and 9, got {args.priority}")
+    if args.timeout is not None and args.timeout <= 0:
+        sys.exit(f"error: timeout must be a positive number of minutes, got {args.timeout}")
+    if args.workdir and not Path(args.workdir).expanduser().is_dir():
+        sys.exit(f"error: workdir is not a directory: {args.workdir}")
+    if args.prompt_file and not Path(args.prompt_file).is_file():
+        sys.exit(f"error: prompt file not found: {args.prompt_file}")
+
+
 def cmd_add(args, cfg):
+    validate_add_options(args, cfg)
     if args.prompt:
         prompt = args.prompt
     elif args.prompt_file:
