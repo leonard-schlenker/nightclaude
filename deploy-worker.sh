@@ -12,6 +12,9 @@ ssh "$HOST" 'mkdir -p ~/.local/bin ~/.config/nightclaude ~/.config/systemd/user 
 scp -q nightclaude.py "$HOST":.local/bin/nightclaude
 ssh "$HOST" 'chmod +x ~/.local/bin/nightclaude'
 scp -q systemd/nightclaude.service systemd/nightclaude.timer "$HOST":.config/systemd/user/
+# Sandbox the night runs: filesystem read-only except workdirs + state.
+ssh "$HOST" 'mkdir -p ~/.config/systemd/user/nightclaude.service.d'
+scp -q systemd/nightclaude-sandbox.conf "$HOST":.config/systemd/user/nightclaude.service.d/sandbox.conf
 ssh "$HOST" '[ -f ~/.config/nightclaude/config.toml ] || cat > ~/.config/nightclaude/config.toml' \
     < config.worker.toml
 

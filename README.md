@@ -140,6 +140,32 @@ Check the result from the PC: `nightclaude status` should report
 - `nightclaude run --local` still runs the queue on the PC if the worker is
   ever unavailable (uses the original workdirs).
 
+## Sandboxing (remote worker)
+
+`deploy-worker.sh` installs a systemd drop-in
+(`systemd/nightclaude-sandbox.conf`) that confines night runs at the kernel
+level: for the runner and every `claude` it starts, the entire filesystem is
+read-only except the mirrored workdirs (`~/nightclaude-work`), nightclaude's
+own data dir, and claude's session state (`~/.claude`, `~/.claude.json`).
+This holds even for tasks queued with `--permission-mode bypassPermissions` —
+a task can trash its own work area at worst, never the system.
+
+Two consequences to be aware of:
+
+- Tasks can read the whole system but only write under `~/nightclaude-work`.
+  A task added directly on the worker with a workdir elsewhere will fail its
+  writes; queue tasks from the controller (or keep workdirs under the mirror
+  root).
+- claude's self-updater is disabled on the worker (the read-only filesystem
+  would make it fail anyway); re-run `deploy-worker.sh` to update.
+
+Single-machine mode is not sandboxed by default because task workdirs are
+arbitrary local directories. To sandbox it anyway, copy the drop-in to
+`~/.config/systemd/user/nightclaude.service.d/sandbox.conf` and add a
+`ReadWritePaths=` line for each directory you queue tasks in
+(`systemctl --user daemon-reload` afterwards). macOS/launchd has no
+equivalent; there the permission mode is the only guard.
+
 ## Usage
 
 ```bash
