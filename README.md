@@ -1,7 +1,6 @@
 # nightclaude
 
-Queue heavy Claude Code tasks during the day, run them automatically at night
-when you are not using your Pro quota interactively.
+Optimize Claude subscription usage by scheduling heavy workload at night. 
 
 Runs either standalone on one machine, or split across two: your PC queues
 tasks (**controller**) and a second, always-on device executes them at night
