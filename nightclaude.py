@@ -17,6 +17,7 @@ Usage:
   nightclaude remove ID
   nightclaude run [--force]     # execute the queue (what the timer calls)
   nightclaude status            # summary + last runner log tail
+  nightclaude usage             # tokens/cost per task and per night
 """
 
 import argparse
@@ -25,8 +26,10 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 try:
     import tomllib
@@ -80,6 +83,16 @@ DEFAULT_CONFIG = {
     # "controller": this machine only queues tasks and syncs them to the
     # remote worker configured in the [remote] table.
     "role": "worker",
+    # Name stamped into tasks queued on this machine, so several controllers
+    # can share one worker without seeing each other's tasks. Empty = use the
+    # hostname; set it explicitly if your hostname changes between networks
+    # (common on macOS).
+    "controller_id": "",
+    # API-equivalent USD one subscription session lets you spend before it
+    # rate-limits. 0 = unknown; when set, `usage` and the nightly summary show
+    # each night as a percentage of a session. Calibrate it from a night that
+    # actually hit a rate limit (see `nightclaude usage`).
+    "session_budget_usd": 0,
 }
 
 DEFAULT_REMOTE = {
@@ -132,9 +145,11 @@ def parse_task(path: Path):
 
 
 def write_task(meta: dict, prompt: str, path: Path):
-    keys = ["id", "title", "status", "depends_on", "workdir", "origin_workdir", "model",
+    keys = ["id", "title", "status", "controller", "depends_on", "workdir", "origin_workdir", "model",
             "permission_mode", "priority", "timeout_minutes", "attempts",
-            "created", "started", "finished", "cost_usd", "error"]
+            "created", "started", "finished", "cost_usd", "turns", "duration_min",
+            "tokens_in", "tokens_out", "tokens_cache_read", "tokens_cache_write",
+            "error"]
     lines = ["---"]
     for k in keys:
         v = meta.get(k, "")
@@ -176,6 +191,20 @@ def slugify(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40] or "task"
 
 
+def controller_id(cfg):
+    """Identity stamped into tasks queued on this machine, so several
+    controllers can share one worker without seeing each other's tasks."""
+    cid = str(cfg.get("controller_id") or "") or socket.gethostname().split(".")[0]
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", cid).strip("-").lower() or "controller"
+
+
+def mine(t, cid):
+    """Tasks from before controller ids existed carry no controller key and
+    are visible to every controller (the first push after upgrading claims
+    them, see do_push)."""
+    return t.get("controller", "") in ("", cid)
+
+
 # ---------------------------------------------------------------- remote sync
 
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
@@ -193,9 +222,30 @@ def remote_reachable(r):
                           capture_output=True).returncode == 0
 
 
-def remote_workdir(r, local_workdir):
-    """Map a controller-side workdir to its mirror on the worker."""
-    return r["work_root"].rstrip("/") + "/" + local_workdir.lstrip("/")
+def remote_workdir(r, cid, local_workdir):
+    """Map a controller-side workdir to its mirror on the worker. Mirrors are
+    namespaced per controller so two machines with the same path layout
+    (e.g. two Linux PCs with the same username) can never collide."""
+    return r["work_root"].rstrip("/") + "/" + cid + "/" + local_workdir.lstrip("/")
+
+
+def remote_owned_task_files(r, cid, dry=False):
+    """Ask the worker which task files belong to this controller. Files
+    without a controller key predate controller ids and are listed for
+    everyone. POSIX sh + grep only; the unmatched *.md glob case is silenced
+    with -s and the trailing exit 0."""
+    script = (f"cd '{r['data_dir']}/tasks' 2>/dev/null || exit 0; "
+              f"grep -Flxs 'controller: {cid}' -- *.md; "
+              "grep -Ls '^controller: ' -- *.md; exit 0")
+    if dry:
+        print(f"would run: ssh {r['host']} "
+              f"<list task files with 'controller: {cid}' or no controller key>")
+        return None
+    res = subprocess.run(["ssh", *SSH_OPTS, r["host"], script],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.exit(f"error: listing tasks on {r['host']} failed: {res.stderr.strip()}")
+    return sorted({f for f in res.stdout.splitlines() if f.endswith(".md")})
 
 
 def _sync(cmds, dry):
@@ -216,13 +266,25 @@ def do_push(cfg, dry=False):
         # Take over the worker's results first so a completed task is never
         # reset to pending by pushing a stale local status over it.
         do_pull(cfg)
-    tasks = load_tasks()
+    cid = controller_id(cfg)
+    tasks = [t for t in load_tasks().values() if mine(t, cid)]
+    files = []
     dirs = set()
-    for t in tasks.values():
+    for t in tasks:
+        if not t.get("controller"):
+            # Task from before controller ids existed. Claim it for this
+            # machine only if its workdir lives here — every controller sees
+            # legacy tasks until the true owner's push stamps them.
+            if not Path(t.get("origin_workdir") or t["workdir"]).expanduser().is_dir():
+                continue
+            if not dry:
+                t["controller"] = cid
+                save_task(t)
+        files.append(str(t["_path"]))
         if t["status"] != "pending":
             continue
         if not t.get("origin_workdir"):
-            origin, mirror = t["workdir"], remote_workdir(r, t["workdir"])
+            origin, mirror = t["workdir"], remote_workdir(r, cid, t["workdir"])
             if not dry:
                 t["origin_workdir"], t["workdir"] = origin, mirror
                 save_task(t)
@@ -236,9 +298,11 @@ def do_push(cfg, dry=False):
             print(f"syncing workdir {origin} ({size}) -> {r['host']}:{mirror} ...", flush=True)
         _sync([["ssh", *SSH_OPTS, r["host"], f"mkdir -p '{mirror}'"],
                ["rsync", "-a", origin.rstrip("/") + "/", f"{r['host']}:{mirror}/"]], dry)
-    _sync([["ssh", *SSH_OPTS, r["host"],
-            f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"],
-           ["rsync", "-a", str(TASKS_DIR) + "/", f"{r['host']}:{r['data_dir']}/tasks/"]], dry)
+    if files:
+        files.sort()
+        _sync([["ssh", *SSH_OPTS, r["host"],
+                f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"],
+               ["rsync", "-a", *files, f"{r['host']}:{r['data_dir']}/tasks/"]], dry)
     if not dry:
         n = len(dirs)
         print(f"pushed queue to {r['host']} ({n} pending task{'s' if n != 1 else ''})")
@@ -246,21 +310,43 @@ def do_push(cfg, dry=False):
 
 def do_pull(cfg, dry=False):
     r = remote_or_exit(cfg)
-    cmds = [
-        ["ssh", *SSH_OPTS, r["host"],
-         f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"],
-        ["rsync", "-a", f"{r['host']}:{r['data_dir']}/tasks/", str(TASKS_DIR) + "/"],
-        ["rsync", "-a", f"{r['host']}:{r['data_dir']}/logs/", str(LOGS_DIR) + "/"],
-    ]
-    _sync(cmds, dry)
+    cid = controller_id(cfg)
+    _sync([["ssh", *SSH_OPTS, r["host"],
+            f"mkdir -p '{r['data_dir']}/tasks' '{r['data_dir']}/logs'"]], dry)
+    # Only this controller's task files come back; another controller's tasks
+    # never land here. Runner logs are per worker, not per task, so everyone
+    # gets those.
+    owned = remote_owned_task_files(r, cid, dry)
+    if owned is None:  # dry run: filenames unknown without asking the worker
+        _sync([["rsync", "-a", "--files-from=<owned-task-files>",
+                f"{r['host']}:{r['data_dir']}/tasks/", str(TASKS_DIR) + "/"],
+               ["rsync", "-a", "--include=runner-*.log", "--include=<owned-task-id>.log",
+                "--exclude=*", f"{r['host']}:{r['data_dir']}/logs/", str(LOGS_DIR) + "/"]], dry)
+    else:
+        if owned:
+            with tempfile.NamedTemporaryFile("w", prefix="nightclaude-pull-") as lf:
+                lf.write("\n".join(owned) + "\n")
+                lf.flush()
+                _sync([["rsync", "-a", f"--files-from={lf.name}",
+                        f"{r['host']}:{r['data_dir']}/tasks/", str(TASKS_DIR) + "/"]], dry)
+        includes = ["--include=runner-*.log"]
+        includes += [f"--include={Path(f).stem}.log" for f in owned]
+        _sync([["rsync", "-a", *includes, "--exclude=*",
+                f"{r['host']}:{r['data_dir']}/logs/", str(LOGS_DIR) + "/"]], dry)
     # Bring results home: sync finished tasks' mirrors back to the original
     # workdirs. -u never overwrites files that are newer on this machine.
     pulled = []
     for t in load_tasks().values():
-        if t.get("origin_workdir") and t["status"] in ("done", "failed"):
-            _sync([["rsync", "-au", f"{r['host']}:{t['workdir'].rstrip('/')}/",
-                    t["origin_workdir"].rstrip("/") + "/"]], dry)
-            pulled.append(f"{t['id']} [{t['status']}]")
+        if not (t.get("origin_workdir") and t["status"] in ("done", "failed")):
+            continue
+        # Only write back this controller's results, and only where the
+        # original workdir actually exists — a legacy task queued on another
+        # machine carries a path that doesn't exist here.
+        if not mine(t, cid) or not Path(t["origin_workdir"]).is_dir():
+            continue
+        _sync([["rsync", "-au", f"{r['host']}:{t['workdir'].rstrip('/')}/",
+                t["origin_workdir"].rstrip("/") + "/"]], dry)
+        pulled.append(f"{t['id']} [{t['status']}]")
     if not dry:
         print(f"pulled from {r['host']}: "
               + ("; ".join(pulled) if pulled else "no finished tasks"))
@@ -326,6 +412,7 @@ def cmd_add(args, cfg):
         "id": tid,
         "title": args.title,
         "status": "pending",
+        "controller": controller_id(cfg),
         "depends_on": [find_task(tasks, d)["id"] for d in deps],
         "workdir": str(Path(args.workdir).expanduser().resolve()) if args.workdir else str(Path.cwd()),
         "model": args.model or cfg["default_model"],
@@ -419,6 +506,52 @@ def cmd_status(args, cfg):
         print("\n".join(last.read_text().splitlines()[-15:]))
 
 
+def cmd_usage(args, cfg):
+    tasks = [t for t in load_tasks().values()
+             if t.get("cost_usd") or any(t.get(k) for k in USAGE_INT_KEYS)]
+    if not tasks:
+        print("no recorded usage yet - tasks record tokens and cost when they run")
+        return
+    # Bucket by night: shift back 12h so a 01:30-07:00 run groups under the
+    # evening the night started on.
+    nights = {}
+    for t in tasks:
+        stamp = t.get("finished") or t.get("started") or t.get("created")
+        key = (dt.datetime.fromisoformat(stamp) - dt.timedelta(hours=12)).date()
+        nights.setdefault(key, []).append(t)
+    budget = float(cfg.get("session_budget_usd") or 0)
+    total = {"cost": 0.0, "in": 0, "out": 0, "cache_read": 0}
+    for key in sorted(nights):
+        ts = sorted(nights[key], key=lambda t: t.get("finished") or "")
+        sub = {"cost": 0.0, "in": 0, "out": 0, "cache_read": 0}
+        print(f"night of {key}:")
+        for t in ts:
+            cost = float(t.get("cost_usd") or 0)
+            sub["cost"] += cost
+            sub["in"] += int(t.get("tokens_in") or 0)
+            sub["out"] += int(t.get("tokens_out") or 0)
+            sub["cache_read"] += int(t.get("tokens_cache_read") or 0)
+            print(f"  [{t['status']:>7}] ${cost:6.2f}"
+                  f"  {fmt_tokens(t.get('tokens_in')):>7} in"
+                  f"  {fmt_tokens(t.get('tokens_out')):>7} out"
+                  f"  {fmt_tokens(t.get('tokens_cache_read')):>7} cache-read"
+                  f"  {int(t.get('turns') or 0):>3} turns"
+                  f"  {float(t.get('duration_min') or 0):5.1f}m"
+                  f"  {t['id']}")
+        print("  night total: "
+              + fmt_usage_line(sub["cost"], sub["in"], sub["out"], sub["cache_read"], budget))
+        for k in total:
+            total[k] += sub[k]
+    if len(nights) > 1:
+        print("\noverall: "
+              + fmt_usage_line(total["cost"], total["in"], total["out"],
+                               total["cache_read"], budget))
+    if not budget:
+        print("\ntip: costs are API-equivalent USD. After a night that hit a "
+              "rate limit,\nset session_budget_usd in the config to that "
+              "night's cost to see future\nnights as a percentage of a session.")
+
+
 # ---------------------------------------------------------------- runner
 
 def runnable(t, tasks):
@@ -443,6 +576,39 @@ def cutoff_time(cfg):
 
 RATE_LIMIT_RE = re.compile(r"(usage limit|rate limit)", re.I)
 RESET_EPOCH_RE = re.compile(r"limit reached\|(\d{9,11})", re.I)
+
+USAGE_INT_KEYS = ("tokens_in", "tokens_out", "tokens_cache_read",
+                  "tokens_cache_write", "turns")
+
+
+def add_usage(t, stats):
+    """Fold one run's usage into the task. Cumulative across attempts:
+    failed and rate-limited runs spend quota too, and that is what these
+    numbers are for."""
+    for k in USAGE_INT_KEYS:
+        if stats.get(k):
+            t[k] = int(t.get(k) or 0) + int(stats[k])
+    if stats.get("cost_usd"):
+        t["cost_usd"] = f"{float(t.get('cost_usd') or 0) + stats['cost_usd']:.4f}"
+    if stats.get("duration_min"):
+        t["duration_min"] = f"{float(t.get('duration_min') or 0) + stats['duration_min']:.1f}"
+
+
+def fmt_tokens(n):
+    n = int(n or 0)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def fmt_usage_line(cost, tin, tout, cread, budget=0):
+    s = (f"${cost:.2f}, {fmt_tokens(tin)} in / {fmt_tokens(tout)} out"
+         f" / {fmt_tokens(cread)} cache-read")
+    if budget and cost:
+        s += f" (~{100 * cost / budget:.0f}% of a session)"
+    return s
 
 
 def run_one(t, cfg, log):
@@ -478,9 +644,9 @@ def run_one(t, cfg, log):
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                               cwd=workdir, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return "failed", f"timed out after {timeout // 60} minutes", None
+        return "failed", f"timed out after {timeout // 60} minutes", {}, None
     except FileNotFoundError:
-        return "failed", f"claude binary not found: {cfg['claude_bin']}", None
+        return "failed", f"claude binary not found: {cfg['claude_bin']}", {}, None
 
     out = proc.stdout or ""
     err = proc.stderr or ""
@@ -488,12 +654,21 @@ def run_one(t, cfg, log):
         f.write(f"\n===== {dt.datetime.now().isoformat(timespec='seconds')} =====\n")
         f.write(out + ("\n--- stderr ---\n" + err if err.strip() else "") + "\n")
 
-    result_text, cost = "", None
+    result_text, stats = "", {}
     try:
         data = json.loads(out)
         result_text = data.get("result", "") or ""
-        cost = data.get("total_cost_usd")
         is_error = data.get("is_error", proc.returncode != 0)
+        usage = data.get("usage") or {}
+        stats = {
+            "cost_usd": data.get("total_cost_usd"),
+            "turns": data.get("num_turns"),
+            "duration_min": (data.get("duration_ms") or 0) / 60000,
+            "tokens_in": usage.get("input_tokens"),
+            "tokens_out": usage.get("output_tokens"),
+            "tokens_cache_read": usage.get("cache_read_input_tokens"),
+            "tokens_cache_write": usage.get("cache_creation_input_tokens"),
+        }
     except (json.JSONDecodeError, AttributeError):
         is_error = proc.returncode != 0
 
@@ -501,11 +676,11 @@ def run_one(t, cfg, log):
     if RATE_LIMIT_RE.search(haystack):
         m = RESET_EPOCH_RE.search(haystack)
         reset = dt.datetime.fromtimestamp(int(m.group(1))) if m else None
-        return "ratelimited", haystack.strip()[:200], reset
+        return "ratelimited", haystack.strip()[:200], stats, reset
 
     if is_error:
-        return "failed", (result_text or err).strip()[:200] or f"exit code {proc.returncode}", cost
-    return "done", "", cost
+        return "failed", (result_text or err).strip()[:200] or f"exit code {proc.returncode}", stats, None
+    return "done", "", stats, None
 
 
 def cmd_run(args, cfg):
@@ -554,6 +729,7 @@ def _run_queue(args, cfg, log):
             save_task(t)
 
     completed = 0
+    night = {"cost": 0.0, "in": 0, "out": 0, "cache_read": 0, "limit_hits": 0}
     while True:
         if not args.force and dt.datetime.now() >= cut:
             log("cutoff reached, stopping")
@@ -583,13 +759,19 @@ def _run_queue(args, cfg, log):
         t["attempts"] = t["attempts"] + 1
         save_task(t)
 
-        status, error, extra = run_one(t, cfg, log)
+        status, error, stats, reset = run_one(t, cfg, log)
+        add_usage(t, stats)
+        night["cost"] += stats.get("cost_usd") or 0
+        night["in"] += stats.get("tokens_in") or 0
+        night["out"] += stats.get("tokens_out") or 0
+        night["cache_read"] += stats.get("tokens_cache_read") or 0
 
         if status == "ratelimited":
+            night["limit_hits"] += 1
             t["status"] = "pending"  # not the task's fault; retry after reset
             t["attempts"] = t["attempts"] - 1
             save_task(t)
-            reset = extra or dt.datetime.now() + dt.timedelta(minutes=int(cfg["retry_wait_minutes"]))
+            reset = reset or dt.datetime.now() + dt.timedelta(minutes=int(cfg["retry_wait_minutes"]))
             reset += dt.timedelta(minutes=2)  # small buffer past the reset
             if not args.force and reset >= cut:
                 log(f"rate limited; reset {reset:%H:%M} is past cutoff, stopping for tonight")
@@ -601,15 +783,20 @@ def _run_queue(args, cfg, log):
         t["status"] = status
         t["finished"] = dt.datetime.now().isoformat(timespec="seconds")
         t["error"] = error
-        if isinstance(extra, (int, float)):
-            t["cost_usd"] = f"{extra:.4f}"
         save_task(t)
+        used = fmt_usage_line(stats.get("cost_usd") or 0, stats.get("tokens_in"),
+                              stats.get("tokens_out"), stats.get("tokens_cache_read"))
         if status == "done":
             completed += 1
-            log(f"  -> done")
+            log(f"  -> done ({used})")
         else:
-            log(f"  -> failed: {error}")
+            log(f"  -> failed: {error} ({used})")
 
+    hits = f", {night['limit_hits']} rate-limit hit(s)" if night["limit_hits"] else ""
+    log("tonight's usage: "
+        + fmt_usage_line(night["cost"], night["in"], night["out"], night["cache_read"],
+                         float(cfg.get("session_budget_usd") or 0))
+        + hits)
     tasks = load_tasks()
     summary = {}
     for t in tasks.values():
@@ -668,6 +855,7 @@ def main():
         s.set_defaults(func=fn)
 
     sub.add_parser("status", help="queue summary + last run log").set_defaults(func=cmd_status)
+    sub.add_parser("usage", help="tokens/cost per task and per night").set_defaults(func=cmd_usage)
 
     args = p.parse_args()
     args.func(args, cfg)

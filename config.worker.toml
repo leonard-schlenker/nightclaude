@@ -10,6 +10,10 @@ default_model = "sonnet"
 default_permission_mode = "acceptEdits"
 claude_bin = "claude"
 
+# API-equivalent USD one subscription session allows before rate-limiting;
+# when set (>0) the nightly summary shows usage as a percentage of a session.
+session_budget_usd = 0
+
 # Every run gets a built-in system prompt telling the model it is running
 # unattended and must finish without asking questions (see NIGHT_SYSTEM_PROMPT
 # in nightclaude.py). Override it here, or set it to "" to disable:

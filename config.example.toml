@@ -27,6 +27,13 @@ default_permission_mode = "acceptEdits"
 
 claude_bin = "claude"
 
+# Roughly how much API-equivalent USD one subscription session lets you spend
+# before it rate-limits. Anthropic doesn't publish this, but every task
+# records its cost (`nightclaude usage`), so after a night that actually hit
+# a rate limit you can set that night's total here. From then on `usage` and
+# the nightly summary show each night as a percentage of a session. 0 = off.
+#session_budget_usd = 0
+
 # Every run gets a built-in system prompt (appended to Claude Code's own via
 # --append-system-prompt) telling the model it is running unattended and must
 # finish without asking questions. See NIGHT_SYSTEM_PROMPT in nightclaude.py
@@ -41,6 +48,12 @@ claude_bin = "claude"
 # this machine only queues tasks and syncs them to the remote worker below
 # (see "Remote worker" in the README).
 #role = "controller"
+
+# Name stamped into tasks queued on this machine. Several controllers (e.g. a
+# PC and a laptop) can share one worker; each only ever syncs its own tasks
+# and results. Defaults to this machine's hostname — set it explicitly if
+# your hostname changes between networks (common on macOS).
+#controller_id = "my-pc"
 
 #[remote]
 # ssh destination of the worker (key auth required, see deploy-worker.sh).
