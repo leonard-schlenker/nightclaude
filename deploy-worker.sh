@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Deploy the nightclaude worker to another Linux machine (e.g. a Raspberry Pi).
-# Usage: ./deploy-worker.sh user@worker.local
+# Usage: ./deploy-worker.sh user@worker.local [worker-config.toml]
+# The optional second argument seeds the worker's config (install.sh passes a
+# generated one); an existing config on the worker is never overwritten.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-HOST=${1:?usage: ./deploy-worker.sh user@host}
+HOST=${1:?usage: ./deploy-worker.sh user@host [worker-config.toml]}
+CFG=${2:-config.worker.toml}
 
 echo "== copying nightclaude to $HOST =="
 ssh "$HOST" 'mkdir -p ~/.local/bin ~/.config/nightclaude ~/.config/systemd/user \
@@ -15,8 +18,12 @@ scp -q systemd/nightclaude.service systemd/nightclaude.timer "$HOST":.config/sys
 # Sandbox the night runs: filesystem read-only except workdirs + state.
 ssh "$HOST" 'mkdir -p ~/.config/systemd/user/nightclaude.service.d'
 scp -q systemd/nightclaude-sandbox.conf "$HOST":.config/systemd/user/nightclaude.service.d/sandbox.conf
-ssh "$HOST" '[ -f ~/.config/nightclaude/config.toml ] || cat > ~/.config/nightclaude/config.toml' \
-    < config.worker.toml
+if ssh "$HOST" '[ -f ~/.config/nightclaude/config.toml ]'; then
+    echo "worker already has a config - keeping it (edit ~/.config/nightclaude/config.toml on the worker to change settings)"
+else
+    ssh "$HOST" 'cat > ~/.config/nightclaude/config.toml' < "$CFG"
+    echo "installed the worker config"
+fi
 
 echo "== enabling nightly timer =="
 ssh "$HOST" 'systemctl --user daemon-reload && systemctl --user enable --now nightclaude.timer'

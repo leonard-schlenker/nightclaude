@@ -47,13 +47,34 @@ and `pull` accept `--dry-run` to print the ssh/rsync commands instead of
 running them. Do not run `./install.sh` casually — it enables timers/agents on
 this machine.
 
+`install.sh` is an interactive wizard when stdin is a tty (it writes the
+config from the user's answers); with piped stdin it falls back to the old
+non-interactive behavior (keep existing config, else copy the example). In
+interactive mode it requires `claude` on PATH up front — offering to
+curl-install it, aborting if declined — and afterwards offers to install the
+skill; when testing with a PATH that lacks `claude`, feed the extra answers
+(or stub `curl`). Test either path without touching the real system by
+faking `HOME`, stubbing the system commands on `PATH`, and using `script` to
+provide a pty:
+
+```bash
+S=$(mktemp -d); mkdir "$S/bin" "$S/home"
+for c in systemctl launchctl ssh scp ssh-copy-id rsync; do
+    printf '#!/bin/sh\necho "[stub %s] $*"\n' "$c" > "$S/bin/$c"; chmod +x "$S/bin/$c"
+done
+printf '1\n\n\n\ny\n' | script -qec "env HOME=$S/home PATH=$S/bin:$PATH ./install.sh" /dev/null
+```
+
 ## Architecture
 
 `nightclaude.py` is the entire program and **must stay a single, stdlib-only,
 Python 3.11+ file**: `deploy-worker.sh` installs it by scp'ing just this one
 file to the worker's `~/.local/bin/nightclaude`. Everything else in the repo
 is packaging (install/deploy scripts, systemd units, launchd plists, example
-configs).
+configs) plus `skills/nightclaude/SKILL.md`, a Claude Code skill teaching
+Claude to queue night tasks from conversations — `install.sh` offers to
+symlink it into `~/.claude/skills/`. Keep its CLI examples in sync with the
+`add` flags in `nightclaude.py`.
 
 ### Task files are the database
 
@@ -67,14 +88,25 @@ with `_` and are stripped on save. The only other mutable state is
 
 ### Controller ↔ worker sync (the subtle part)
 
+- Several controllers can share one worker. Every task is stamped with a
+  `controller` id at `add` time (`controller_id` config key, hostname by
+  default), and all sync is scoped to it: `push` only sends this machine's
+  tasks, `pull` asks the worker (a remote `grep` over the task files, see
+  `remote_owned_task_files()`) which task files it owns and fetches only
+  those plus their logs. Tasks without a `controller` key are legacy,
+  visible to every controller, and claimed by the first `push` from a
+  machine where the task's workdir exists. The worker runner ignores the
+  stamp and just runs everything in `tasks/`.
 - On `push`, each pending task's `workdir` is rewritten to the worker-side
-  mirror path (`nightclaude-work/<original absolute path>`, relative to the
-  worker's home) and the original is kept in `origin_workdir`. This rewrite
-  happens once; the presence of `origin_workdir` marks an already-pushed task.
+  mirror path (`nightclaude-work/<controller>/<original absolute path>`,
+  relative to the worker's home) and the original is kept in
+  `origin_workdir`. This rewrite happens once; the presence of
+  `origin_workdir` marks an already-pushed task.
 - `push` always pulls first so a task the worker finished is never reset to
   pending by a stale local copy. `pull` copies task files/logs back, then
   rsyncs finished tasks' mirrors onto the original workdirs with `-u` (never
-  overwrite files newer on the controller).
+  overwrite files newer on the controller) — only for tasks this controller
+  owns and whose `origin_workdir` exists locally.
 - `run --local` on a controller sets `_use_origin` so pushed tasks run in
   their original workdirs, not the (nonexistent locally) mirror paths.
 
@@ -107,6 +139,12 @@ All in `_run_queue()`/`run_one()`:
   night runs fail with EROFS. It also sets `DISABLE_AUTOUPDATER=1`; worker
   updates happen only via re-running `deploy-worker.sh`.
 - `config.worker.toml` is the config `deploy-worker.sh` seeds the worker
-  with; `config.example.toml` is the human-facing one for `install.sh`. New
-  config keys need a commented entry in the example and a default in
-  `DEFAULT_CONFIG` (the code never assumes a key exists in the file).
+  with when run standalone; the `install.sh` wizard instead passes a
+  generated worker config as `deploy-worker.sh`'s optional second argument
+  (an existing config on the worker is never overwritten). The wizard also
+  writes the local config itself (`write_runner_config`/
+  `write_controller_config` in `install.sh`); `config.example.toml` remains
+  the documented reference and the non-interactive fallback. New config keys
+  need a commented entry in the example, a default in `DEFAULT_CONFIG` (the
+  code never assumes a key exists in the file), and — if users should set
+  them at install time — a prompt in the wizard's config writers.

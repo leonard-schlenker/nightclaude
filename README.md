@@ -25,14 +25,21 @@ Note: night runs avoid the 5-hour session window but still count toward the
 
 ## Setup
 
-Requirements, on every machine that will *run* tasks:
+Requirements: Linux (with systemd) or macOS, and Python 3.11+. Claude Code
+is needed too, but the installer checks for it and offers to install it if
+missing — you only have to log in once with your subscription (`claude`,
+then `/login`).
 
-- Linux (with systemd) or macOS
-- Python 3.11+
-- Claude Code installed and logged in with your subscription
+The installer is a guided setup: run it, answer a few questions, and it
+writes the config, schedules the jobs and (for remote setups) deploys the
+worker — no config files to edit. It also offers to install the bundled
+Claude Code **skill**, which lets Claude queue night tasks for you right
+from a conversation ("convert the rest of these overnight"). Re-run
+`./install.sh` any time to reconfigure; for hand-tuning later, every option
+is documented in `config.example.toml`.
 
-Then pick a mode: **A** — everything on one machine, or **B** — queue on
-the PC, run on a separate worker.
+Pick a mode when asked: **A** — everything on one machine, or **B** — queue
+on the PC, run on a separate worker.
 
 ### A. Single machine
 
@@ -44,14 +51,12 @@ the PC, run on a separate worker.
    ./install.sh
    ```
 
-   This symlinks the CLI to `~/.local/bin/nightclaude`, creates
-   `~/.config/nightclaude/config.toml` from the example, and schedules the
-   nightly run at 01:30.
+   Choose "single machine" and answer the questions (morning cutoff, tasks
+   per night, default model — Enter keeps the defaults). This writes
+   `~/.config/nightclaude/config.toml`, symlinks the CLI to
+   `~/.local/bin/nightclaude`, and schedules the nightly run at 01:30.
 
-2. *(Optional)* Adjust `~/.config/nightclaude/config.toml` — cutoff time,
-   tasks per night, default model; every key is explained there.
-
-3. Make sure the machine is awake at 01:30. If it normally suspends,
+2. Make sure the machine is awake at 01:30. If it normally suspends,
    schedule a wake-up:
    - Linux: a cron entry running
      `rtcwake -m no -t $(date -d 'tomorrow 01:25' +%s)`
@@ -68,46 +73,32 @@ Done — queue your first task (see [Usage](#usage)).
 The worker is any Linux machine that can stay on at night. It needs very
 little compute — the heavy lifting happens on Anthropic's side — so even a
 Raspberry Pi 3/4/5 (64-bit OS, idles at ~2-4 W) works fine. To use a Mac as
-the worker instead, follow **A** on it directly (the deploy script in step 4
-assumes systemd) and only do steps 1-3 here.
+the worker instead, run `./install.sh` on it and pick "single machine" (the
+deploy step assumes systemd), then do only step 1 here.
 
 On the **PC**:
 
-1. Clone the repo and create the config:
+1. Clone and install:
 
    ```bash
    git clone https://github.com/leonard-schlenker/nightclaude.git
    cd nightclaude
-   mkdir -p ~/.config/nightclaude
-   cp config.example.toml ~/.config/nightclaude/config.toml
-   ```
-
-2. In `~/.config/nightclaude/config.toml`, uncomment `role = "controller"`
-   and the `[remote]` section, and set `host` to the worker's ssh
-   destination (e.g. `pi@raspberrypi.local`).
-
-3. Install:
-
-   ```bash
    ./install.sh
    ```
 
-   In controller mode this enables pull-on-login and no local night run.
-
-4. Give the PC passwordless ssh access to the worker, then deploy:
-
-   ```bash
-   ssh-copy-id user@worker.local
-   ./deploy-worker.sh user@worker.local
-   ```
-
-   This copies nightclaude to the worker, enables its night timer, and turns
-   on systemd lingering so the timer fires with nobody logged in (asks for
-   the worker's sudo password once).
+   Choose "controller" and answer the questions. The installer asks for the
+   worker's ssh destination (e.g. `pi@raspberrypi.local`), sets up
+   passwordless ssh if needed (creates a key and runs `ssh-copy-id` for
+   you), writes the config, enables pull-on-login instead of a local night
+   run, and offers to deploy the worker right away. Deploying copies
+   nightclaude over, enables the worker's night timer, and turns on systemd
+   lingering so the timer fires with nobody logged in (asks for the worker's
+   sudo password once). You can also deploy — or later update — the worker
+   separately with `./deploy-worker.sh user@worker.local`.
 
 On the **worker**:
 
-5. Install Claude Code and log in with your subscription — the URL +
+2. Install Claude Code and log in with your subscription — the URL +
    paste-code `/login` flow works over ssh:
 
    ```bash
@@ -122,9 +113,9 @@ Check the result from the PC: `nightclaude status` should report
 
 - `nightclaude add` writes the task and immediately **pushes** it: the task
   files and the task's whole workdir are rsynced to the worker (workdir
-  mirrored under `~/nightclaude-work/<original path>`). If the worker is
-  unreachable you get a note — run `nightclaude push` later (e.g. before
-  shutting down).
+  mirrored under `~/nightclaude-work/<controller>/<original path>`). If the
+  worker is unreachable you get a note — run `nightclaude push` later (e.g.
+  before shutting down).
 - The worker's own timer runs the queue at night, exactly like standalone
   mode (rate-limit waiting, cutoff, retries).
 - On PC login, a pull job (`nightclaude-pull.service` on Linux,
@@ -138,6 +129,20 @@ Check the result from the PC: `nightclaude status` should report
   the worker.
 - `nightclaude run --local` still runs the queue on the PC if the worker is
   ever unavailable (uses the original workdirs).
+
+### Several controllers, one worker
+
+Multiple machines (say a PC and a MacBook) can queue tasks on the same
+worker: repeat the controller setup on each. Every task is stamped with the
+controller it was queued on (the hostname by default — set `controller_id`
+in the config if your hostname is unstable), and push/pull only ever touch
+that controller's tasks, logs and workdir mirrors. The worker runs the
+combined queue at night; each machine gets exactly its own results back and
+never sees the others' tasks.
+
+Tasks queued before this feature existed carry no controller stamp and are
+visible to every controller; the first push from the machine where a task's
+workdir exists claims it.
 
 ## Sandboxing (remote worker)
 
@@ -184,6 +189,7 @@ nightclaude show <id>       # full task file (id prefixes are accepted)
 nightclaude edit <id>       # open in $EDITOR
 nightclaude log <id>        # claude's output for that task
 nightclaude status          # queue summary + last run log
+nightclaude usage           # tokens/cost per task, grouped by night
 nightclaude retry <id>      # re-queue a failed/done task
 nightclaude remove <id>
 
@@ -192,6 +198,16 @@ nightclaude run --force     # run the queue right now, ignoring the cutoff
 
 Task files are plain text — you can also create or edit them directly in
 `~/.local/share/nightclaude/tasks/`.
+
+### Queueing from a Claude conversation
+
+If you installed the skill (offered by `./install.sh`; it symlinks
+`skills/nightclaude` into `~/.claude/skills/`), Claude Code picks it up
+automatically: tell Claude to "do X overnight" in any conversation and it
+queues the task itself — writing a self-contained night prompt from the
+context you discussed — and reports the task id. It also knows how to check
+`status`, `log` and `usage` for you, and not to start the queue during the
+day on its own.
 
 ## Writing good night prompts
 
@@ -216,7 +232,17 @@ to disable.
 
 ## Monitoring
 
+Every run records what it used: tokens (input/output/cache-read), API-equivalent
+cost, turns and duration are written into each task's frontmatter (cumulative
+across retries — failed and rate-limited attempts spend quota too), and the
+runner log ends with a "tonight's usage" total. `nightclaude usage` shows it
+all grouped by night, so you can estimate how much a future queue will eat.
+Subscription session limits are opaque, but after a night that hit a rate
+limit you can set that night's cost as `session_budget_usd` in the config;
+nights are then also shown as a percentage of a session.
+
 ```bash
+nightclaude usage
 nightclaude status
 
 # Linux
