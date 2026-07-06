@@ -1,6 +1,6 @@
 # nightclaude
 
-Optimize Claude subscription usage by scheduling heavy workload at night. 
+Optimize Claude subscription usage by scheduling heavy workloads at night. 
 
 Runs either standalone on one machine, or split across two: your PC queues
 tasks (**controller**) and a second, always-on device executes them at night
